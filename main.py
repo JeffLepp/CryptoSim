@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+from tax_class import TaxRule, Lot, get_tax_rate, match_lots
+
 # Ensure you have loaded BTC data in a new folder named 'data' if you are running this for the first time.
 # Due to it's size, it cannot be included in the repo directly, use the link below to find the dataset.
 # https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data/versions/416?resource=download
@@ -44,7 +46,7 @@ def preprocess_data(df):
 
 
 # Next we need some strategy to make a historical portfolio, unless later we decide to pass into it a portfolio
-def create_portfolio(df):
+def create_portfolio_signals(df):
     df = df.copy()
     df["position"] = 0   
 
@@ -52,14 +54,47 @@ def create_portfolio(df):
     df["momentum"] = df["log_return"].rolling(window=30, min_periods=30).mean()
 
     df.loc[trending_up & (df["momentum"] > 0), "position"] = 1      # long position
-    trades = df["position"].diff().abs()
-    cost_per_trade = 0.001    # 0.1% trading cost per trade
-    
-    df["strategy_return"] = df["position"].shift(1) * df["log_return"]
-    df["strategy_return"] -= trades * cost_per_trade
 
     return df
 
+def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
+    df = df.copy()
+    df["pos_change"] = df["position"].diff().fillna(0).fillna(0)
+
+    records = []
+    it = 1
+
+    for idx, change in df["pos_change"].items():
+        if change == 0:
+            continue
+
+        if change > 0:
+            trade_type = "BUY"
+        elif change < 0:
+            trade_type = "SELL"
+        else:
+            continue
+
+        trade_amount = abs(change) * trade_size
+        price = df.at[idx, "Price"]
+        time = df.at[idx, "Timestamp"]
+        fee = trade_amount * price * fee_rate
+
+        record = {
+            "trade_id": it,
+            "ticker": "BTCUSD",
+            "timestamp": time,
+            "trade_type": trade_type,
+            "trade_amount": trade_amount,
+            "price": price,
+            "fee": fee
+        }
+        records.append(record)
+        it += 1
+
+    trades_df = pd.DataFrame(records)
+    trades_df = trades_df.sort_values("timestamp").reset_index(drop=True)
+    return trades_df
 
 # Finally we compute performance of the strategy vs buy & hold
 def compute_performance(df):
@@ -87,23 +122,20 @@ def main():
 
     df = load_price_data(FILE_NAME)
     df = preprocess_data(df)
-    df = create_portfolio(df)
-    df = compute_performance(df)
+    df = create_portfolio_signals(df)
 
-    # Here we have a synthetic example of any naive crypto strategy
+    trade_size = 0.1
+    fee_rate = .001
+    tades_df = create_transactions_from_signals(df, trade_size, fee_rate)
 
-    # We need now:
-    
-    # Estimate total capital gains
+    print("number of trades:", len(tades_df))
 
-    # Simulate tax liability
+    taxRules = TaxRule(short_term_rate=0.3, long_term_rate=0.15, threshold_days=365)
 
-    # Compare different trading rules
-
-    # Evaluate whether your strategy is worth using at all
-
+    # Once tax strategy is defined, we can match lots here
     # Feed into more advanced tax models (FIFO, LIFO, HIFO, etc.)
 
-    # Build spreadsheet-ready tables
+    #df = compute_performance(df)
+
 
 main()

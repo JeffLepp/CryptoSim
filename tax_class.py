@@ -5,12 +5,12 @@ from copy import deepcopy
 import pandas as pd
 
 @dataclass
-
 class TaxRule:
     short_term_rate: float
     long_term_rate: float
     threshold_days: int = 365
 
+@dataclass
 class Lot:
     buy_id: int
     coin: str
@@ -32,7 +32,7 @@ def match_lots(transactions, tax_rule, lot_sort_key):
     tax_records = []
 
     for idx, row in tax.iterrows():
-        trade_type = row
+        trade_type = row["trade_type"]
         date = row["timestamp"]
         coin = row["ticker"]
         price = row["price"]
@@ -52,11 +52,11 @@ def match_lots(transactions, tax_rule, lot_sort_key):
 
         elif trade_type == "SELL":
             qty_to_sell = amount
-            proceeds = amount * price
+            total_proceeds = 0.0
             realized_gain = 0.0
             taxes = 0.0
 
-            open_lots.sort(open_lots, key=lot_sort_key)
+            open_lots.sort(key=lot_sort_key)
 
             for lot in open_lots:
                 if qty_to_sell <= 0:
@@ -72,10 +72,11 @@ def match_lots(transactions, tax_rule, lot_sort_key):
                 holding_days = (date - lot.buy_date).days
                 tax_rate = get_tax_rate(holding_days, tax_rule)
 
-                tax = max(gain, 0,0) * tax_rate
+                tax = max(gain, 0.0) * tax_rate
 
                 realized_gain += gain
                 taxes += tax
+                total_proceeds += proceeds
 
                 lot.remaining_amount -= used
                 qty_to_sell -= used
@@ -86,13 +87,43 @@ def match_lots(transactions, tax_rule, lot_sort_key):
                 "timestamp": date,
                 "quantity_sold": amount,
                 "price": price,
-                "proceeds": proceeds,
+                "proceeds": total_proceeds,
                 "realized_gain": realized_gain,
                 "taxes": taxes,
                 "after_tax_gain": realized_gain - taxes
             })
 
-    result = pd.Dataframe(tax_records).sort_values("timestamp").reset_index(drop=True)
+    result = pd.DataFrame(tax_records).sort_values("timestamp").reset_index(drop=True)
     return result
 
 # PUT STRATEGIES HERE
+
+# oldest lot is bought first 
+def fifo_strategy(transaction, tax_rule):
+    return match_lots(transaction, tax_rule, lot_sort_key=lambda lot: lot.buy_date)
+
+# newest lot is bought first
+def lifo_strategy(transaction, tax_rule):
+    return match_lots(transaction, tax_rule, lot_sort_key=lambda lot: -lot.buy_date.timestamp())
+
+# highest price lot is bought first
+def hifo_strategy(transaction, tax_rule):
+    return match_lots(transaction, tax_rule, lot_sort_key=lambda lot: -lot.buy_price)
+
+def output_tax_report(tax_df):
+    total_gain = tax_df["realized_gain"].sum()
+    total_taxes = tax_df["taxes"].sum()
+    total_after_tax_gain = tax_df["after_tax_gain"].sum()
+    tax_rate_effective = total_taxes / total_gain if total_gain != 0 else 0.0
+
+    print ("=== TAX REPORT ===")
+    print (f"Total Realized Gain: {total_gain:.2f}")
+    print (f"Total Taxes:        {total_taxes:.2f}")
+    print (f"Total After-Tax Gain: {total_after_tax_gain:.2f}")
+
+    return {
+        "total_gain": total_gain,
+        "total_taxes": total_taxes,
+        "total_after_tax_gain": total_after_tax_gain,
+        "effective_tax_rate": tax_rate_effective,
+    }

@@ -2,14 +2,16 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from tax_class import TaxRule, Lot, get_tax_rate, match_lots
+from tax_class import TaxRule, Lot, get_tax_rate, match_lots, fifo_strategy, lifo_strategy, hifo_strategy, output_tax_report
+from test import run_test
 
 # Ensure you have loaded BTC data in a new folder named 'data' if you are running this for the first time.
 # Due to it's size, it cannot be included in the repo directly, use the link below to find the dataset.
 # https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data/versions/416?resource=download
 
 FILE_NAME = "btcusd_1-min_data.csv"
-NUM_ROWS_TO_LOAD = 500000       # Limiting number of rows we import from file due to it's massive size
+# 7291838 available rows, each representing a minute of BTC price data
+NUM_ROWS_TO_LOAD = 80000       # Limiting number of rows we import from file due to it's massive size
 
 
 # Loading the BTC price data from CSV file
@@ -17,6 +19,7 @@ def load_price_data(file_name = FILE_NAME):
 
     # Search through folder 'data' and import dataframe
     file_path = 'data/' + file_name
+
     df = pd.read_csv(file_path, nrows = NUM_ROWS_TO_LOAD)
 
     # UNIX time is a little confusing, so we convert to datetime and sort by it
@@ -46,14 +49,29 @@ def preprocess_data(df):
 
 
 # Next we need some strategy to make a historical portfolio, unless later we decide to pass into it a portfolio
-def create_portfolio_signals(df):
+def create_portfolio_signals(df, max_pos=3):
     df = df.copy()
-    df["position"] = 0   
+    df["position"] = 0
 
-    trending_up = (df["SMA_short"] > df["SMA_long"]) & (df["Price"] > 1.01 * df["SMA_long"])
+    # Basic crossover signals
+    diff = df["SMA_short"] - df["SMA_long"]
+    prev_diff = diff.shift(1)
+
+    # entry signal- short SMA crosses above long SMA
+    buy_signal = (prev_diff <= 0) & (diff > 0)
+
+    # exit signal- short SMA crosses below long SMA
+    sell_signal = (prev_diff >= 0) & (diff < 0)
     df["momentum"] = df["log_return"].rolling(window=30, min_periods=30).mean()
 
-    df.loc[trending_up & (df["momentum"] > 0), "position"] = 1      # long position
+    for i in range(1, len(df)):
+        prev_pos = df.at[i-1, "position"]
+        if buy_signal.iloc[i] and df["momentum"].iloc[i] > 0:
+            df.at[i, "position"] = min(prev_pos + 1, max_pos)
+        elif sell_signal.iloc[i]:
+            df.at[i, "position"] = max(prev_pos - 1, 0)
+        else:
+            df.at[i, "position"] = prev_pos
 
     return df
 
@@ -68,6 +86,7 @@ def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
         if change == 0:
             continue
 
+        # Portfolio buys at few strategic points
         if change > 0:
             trade_type = "BUY"
         elif change < 0:
@@ -93,30 +112,9 @@ def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
         it += 1
 
     trades_df = pd.DataFrame(records)
+
     trades_df = trades_df.sort_values("timestamp").reset_index(drop=True)
     return trades_df
-
-# Finally we compute performance of the strategy vs buy & hold
-def compute_performance(df):
-    df = df.copy()
-
-    # Cumulative log returns of strategy
-    df["cum_log_return_strat"] = df["strategy_return"].cumsum()
-    df["equity_strat"] = np.exp(df["cum_log_return_strat"])   # starting at 1.0
-
-    # For comparison: buy & hold (always position = 1)
-    df["cum_log_return_buy_hold"] = df["log_return"].cumsum()
-    df["equity_buy_hold"] = np.exp(df["cum_log_return_buy_hold"])
-
-    final_equity_strat = df["equity_strat"].iloc[-1]
-    final_equity_buy_hold = df["equity_buy_hold"].iloc[-1]
-
-    print("=== PERFORMANCE over sample ===")
-    print(f"Strategy total return:   {final_equity_strat - 1:.2%}")
-    print(f"Buy & hold total return: {final_equity_buy_hold - 1:.2%}")
-
-    return df
-
 
 def main():
 
@@ -126,16 +124,21 @@ def main():
 
     trade_size = 0.1
     fee_rate = .001
-    tades_df = create_transactions_from_signals(df, trade_size, fee_rate)
+    trades_df = create_transactions_from_signals(df, trade_size, fee_rate)
 
-    print("number of trades:", len(tades_df))
+    print("number of trades:", len(trades_df))
 
     taxRules = TaxRule(short_term_rate=0.3, long_term_rate=0.15, threshold_days=365)
 
-    # Once tax strategy is defined, we can match lots here
-    # Feed into more advanced tax models (FIFO, LIFO, HIFO, etc.)
+    # fifo_tax = fifo_strategy(trades_df, taxRules)
+    # fifo_summary = output_tax_report(fifo_tax)
 
-    #df = compute_performance(df)
+    # lifo_tax = lifo_strategy(trades_df, taxRules)
+    # lifo_summary = output_tax_report(lifo_tax)
 
+    # hifo_tax = hifo_strategy(trades_df, taxRules)
+    # hifo_summary = output_tax_report(hifo_tax)
+
+    run_test(taxRules)
 
 main()

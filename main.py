@@ -9,10 +9,8 @@ from test import run_test
 # Due to it's size, it cannot be included in the repo directly, use the link below to find the dataset.
 # https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data/versions/416?resource=download
 
-FILE_NAME = "btcusd_1-min_data.csv"
-# 7291838 available rows, each representing a minute of BTC price data
-NUM_ROWS_TO_LOAD = 80000       # Limiting number of rows we import from file due to it's massive size
-
+FILE_NAME = "btcusd_1-min_data.csv" # 7291838 available rows, each representing a minute of BTC price data
+SCALEDOWN_FACTOR = 30 # Large dataset, if set to 30 we will consider BTC price once every 30 mins
 
 # Loading the BTC price data from CSV file
 def load_price_data(file_name = FILE_NAME):
@@ -20,12 +18,13 @@ def load_price_data(file_name = FILE_NAME):
     # Search through folder 'data' and import dataframe
     file_path = 'data/' + file_name
 
-    df = pd.read_csv(file_path, nrows = NUM_ROWS_TO_LOAD)
+    df = pd.read_csv(file_path, skiprows=lambda i: i > 0 and i % SCALEDOWN_FACTOR != 0)
 
     # UNIX time is a little confusing, so we convert to datetime and sort by it
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit='s')
     df = df.sort_values("Timestamp").reset_index(drop=True)
 
+    print("Loaded data with", len(df), "rows")
     return df
 
 
@@ -49,32 +48,48 @@ def preprocess_data(df):
 
 
 # Next we need some strategy to make a historical portfolio, unless later we decide to pass into it a portfolio
-def create_portfolio_signals(df, max_pos=3):
+def create_portfolio_signals(df, max_pos=10):
+
+    buy_threshold = 0.05
+    sell_threshold = -0.05
+
     df = df.copy()
     df["position"] = 0
 
-    # Basic crossover signals
-    diff = df["SMA_short"] - df["SMA_long"]
-    prev_diff = diff.shift(1)
+    if "log_return" not in df.columns:
+        raise ValueError("DataFrame must contain 'log_return' column")
 
-    # entry signal- short SMA crosses above long SMA
-    buy_signal = (prev_diff <= 0) & (diff > 0)
-
-    # exit signal- short SMA crosses below long SMA
-    sell_signal = (prev_diff >= 0) & (diff < 0)
     df["momentum"] = df["log_return"].rolling(window=30, min_periods=30).mean()
 
     for i in range(1, len(df)):
+
+        # Get position and current indicators
         prev_pos = df.at[i-1, "position"]
-        if buy_signal.iloc[i] and df["momentum"].iloc[i] > 0:
-            df.at[i, "position"] = min(prev_pos + 1, max_pos)
-        elif sell_signal.iloc[i]:
-            df.at[i, "position"] = max(prev_pos - 1, 0)
-        else:
+        price = df.at[i, "Price"]
+        sma_long = df.at[i, "SMA_long"]
+        momentum = df.at[i, "momentum"]
+
+        # Hold if momentum/SMAlong isnt ready
+        if pd.isna(sma_long) or pd.isna(momentum):
             df.at[i, "position"] = prev_pos
+            continue
+
+        # Find relative Deviance
+        relative_dev = (price - sma_long) / sma_long
+
+        # Act based upon deviance/momentum and thresholds
+        if relative_dev > buy_threshold and momentum > 0:
+            new_pos = min(prev_pos + 1, max_pos)
+        elif relative_dev < sell_threshold and momentum < 0:
+            new_pos = max(prev_pos - 1, 0)
+        else:
+            new_pos = prev_pos
+
+        df.at[i, "position"] = new_pos
 
     return df
 
+# Create buy/sell transactions from portfolio signals
 def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
     df = df.copy()
     df["pos_change"] = df["position"].diff().fillna(0).fillna(0)
@@ -86,7 +101,7 @@ def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
         if change == 0:
             continue
 
-        # Portfolio buys at few strategic points
+        # Reading portfolio signals
         if change > 0:
             trade_type = "BUY"
         elif change < 0:
@@ -99,6 +114,7 @@ def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
         time = df.at[idx, "Timestamp"]
         fee = trade_amount * price * fee_rate
 
+        # Records for tax calculation
         record = {
             "trade_id": it,
             "ticker": "BTCUSD",
@@ -130,15 +146,34 @@ def main():
 
     taxRules = TaxRule(short_term_rate=0.3, long_term_rate=0.15, threshold_days=365)
 
-    # fifo_tax = fifo_strategy(trades_df, taxRules)
-    # fifo_summary = output_tax_report(fifo_tax)
+    fifo_tax = fifo_strategy(trades_df, taxRules)
+    fifo_summary = output_tax_report(fifo_tax)
 
-    # lifo_tax = lifo_strategy(trades_df, taxRules)
-    # lifo_summary = output_tax_report(lifo_tax)
+    lifo_tax = lifo_strategy(trades_df, taxRules)
+    lifo_summary = output_tax_report(lifo_tax)
 
-    # hifo_tax = hifo_strategy(trades_df, taxRules)
-    # hifo_summary = output_tax_report(hifo_tax)
-
-    run_test(taxRules)
+    hifo_tax = hifo_strategy(trades_df, taxRules)
+    hifo_summary = output_tax_report(hifo_tax)
 
 main()
+
+# Expected output for   buy/sell thresholds at 5%, 
+#                       max_position 10, 
+#                       trade size 0.1 BTC, 
+#                       fee rate 0.1%, 
+#                       with scaledown_factor 30:
+
+# Loaded data with 243061 rows
+# number of trades: 3218
+# === TAX REPORT ===
+# Total Realized Gain: 95414.53
+# Total Taxes:        58294.15
+# Total After-Tax Gain: 37120.38
+# === TAX REPORT ===
+# Total Realized Gain: 95414.53
+# Total Taxes:        58205.24
+# Total After-Tax Gain: 37209.29
+# === TAX REPORT ===
+# Total Realized Gain: 95414.53
+# Total Taxes:        58207.16
+# Total After-Tax Gain: 37207.37

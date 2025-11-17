@@ -48,10 +48,7 @@ def preprocess_data(df):
 
 
 # Next we need some strategy to make a historical portfolio, unless later we decide to pass into it a portfolio
-def create_portfolio_signals(df, max_pos=10):
-
-    buy_threshold = 0.05
-    sell_threshold = -0.05
+def create_portfolio_signals(df, max_pos=10, buy_threshold = 0.05, sell_threshold = -0.05):
 
     df = df.copy()
     df["position"] = 0
@@ -136,10 +133,15 @@ def main():
 
     df = load_price_data(FILE_NAME)
     df = preprocess_data(df)
-    df = create_portfolio_signals(df)
 
     trade_size = 0.1
     fee_rate = .001
+
+    buy_threshold = 0.05
+    sell_threshold = -0.05
+    max_pos = 10
+
+    df = create_portfolio_signals(df, max_pos, buy_threshold, sell_threshold)
     trades_df = create_transactions_from_signals(df, trade_size, fee_rate)
 
     print("number of trades:", len(trades_df))
@@ -154,6 +156,20 @@ def main():
 
     hifo_tax = hifo_strategy(trades_df, taxRules)
     hifo_summary = output_tax_report(hifo_tax)
+
+    # Details tax reports if we find a clever way to demonstrate them visually
+    fifo_tax.to_csv(f"output/fifo_tax_thr{buy_threshold}_pos{max_pos}_scale{SCALEDOWN_FACTOR}.csv", index=False)
+    lifo_tax.to_csv(f"output/lifo_tax_thr{buy_threshold}_pos{max_pos}_scale{SCALEDOWN_FACTOR}.csv", index=False)
+    hifo_tax.to_csv(f"output/hifo_tax_thr{buy_threshold}_pos{max_pos}_scale{SCALEDOWN_FACTOR}.csv", index=False)
+
+    summary_df = pd.DataFrame([
+        {"strategy": "FIFO", **fifo_summary},
+        {"strategy": "LIFO", **lifo_summary},
+        {"strategy": "HIFO", **hifo_summary},
+    ])
+
+    # Main thing to look at result wise when plotting
+    summary_df.to_csv("output/summary.csv", index=False)
 
 main()
 

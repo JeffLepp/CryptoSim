@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import os
 
 from prediction import create_lstm_positions_from_df
 from tax_class import TaxRule, Lot, get_tax_rate, match_lots, fifo_strategy, lifo_strategy, hifo_strategy, output_tax_report
@@ -11,7 +12,7 @@ from test import run_test
 # https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data/versions/416?resource=download
 
 FILE_NAME = "btcusd_1-min_data.csv" # 7291838 available rows, each representing a minute of BTC price data
-SCALEDOWN_FACTOR = 30 # Large dataset, if set to 30 we will consider BTC price once every 30 mins
+SCALEDOWN_FACTOR = 1440 # Large dataset, if set to 30 we will consider BTC price once every 30 mins
 USE_LSTM_SIGNALS = True  
 
 # Loading the BTC price data from CSV file
@@ -156,7 +157,7 @@ def main():
 
     trades_df = create_transactions_from_signals(df_signals, trade_size, fee_rate)
 
-
+    os.makedirs("output", exist_ok=True)
     print("number of trades:", len(trades_df))
 
     taxRules = TaxRule(short_term_rate=0.3, long_term_rate=0.15, threshold_days=365)
@@ -183,6 +184,8 @@ def main():
 
     # Main thing to look at result wise when plotting
     summary_df.to_csv("output/summary.csv", index=False)
+
+    print("Total simulated time:", df_signals["Timestamp"].iloc[-1] - df_signals["Timestamp"].iloc[0])
 
 main()
 

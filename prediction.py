@@ -1,4 +1,3 @@
-# ========== Install dependencies (only need to run once in terminal) ==========
 # pip install yfinance numpy pandas scikit-learn tensorflow
 
 import numpy as np
@@ -13,98 +12,187 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 
 import matplotlib.pyplot as plt
 
-if __name__ == "main":
-    # ===================== Configuration ===================== #
-    TICKER = "AAPL"          # Stock ticker (e.g. TSLA)
-    START_DATE = "2015-01-01"
-    END_DATE = "2025-11-01"
+# ===================== Configuration ===================== #
+TICKER = "AAPL"          
+START_DATE = "2015-01-01"
+END_DATE = "2025-11-01"
 
-    WINDOW_SIZE = 60         # Number of past days to predict the next day
-    TEST_RATIO = 0.2         # Last 20% as test set
+WINDOW_SIZE = 60         # Number of past days to predict next
+TEST_RATIO = 0.2         # Last 20% as test set
 
+# ===================== 3. Create Sliding Window Sequences ===================== #
+def create_sequences(data, window_size):
+    X, y = [], []
+    for i in range(window_size, len(data)):
+        X.append(data[i-window_size:i, 0])  # Past window_size days
+        y.append(data[i, 0])                # Value on day i
+    return np.array(X), np.array(y)
 
-    def create_lstm_positions_from_df(
-        df,
-        window_size=WINDOW_SIZE,
-        test_ratio=TEST_RATIO,
-        epochs=10,
-        batch_size=32,
-        max_pos=10,
-        up_threshold=0.01,
-        down_threshold=-0.01,
-    ):
-        """
-        Train the existing LSTM model on df['Price'] (BTC data passed from main.py),
-        then use next-step predictions to build a 'position' column.
+def create_lstm_positions_from_df(df, window_size=60, test_ratio=0.2, epochs=10, batch_size=32,
+                                  max_pos=10, up_threshold=0.01, down_threshold=-0.01, make_plots=False, ticker='BTCUSD'):
 
-        Returns a copy of df with a new 'position' column.
-        """
+    # prepare price data  
+    df = df.copy()
+    if "Price" not in df.columns:
+        raise ValueError("DataFrame must contain a 'Price' column")
 
-        # ---- 1) Prepare price data ----
-        df = df.copy()
-        if "Price" not in df.columns:
-            raise ValueError("DataFrame must contain a 'Price' column")
+    prices = df["Price"].values.reshape(-1, 1)
 
-        prices = df["Price"].values.reshape(-1, 1)
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_close = scaler.fit_transform(prices)
 
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_close = scaler.fit_transform(prices)
+    # create sequences and train the same kind of model as below
+    X, y = create_sequences(scaled_close, window_size)  
+    X = X.reshape((X.shape[0], X.shape[1], 1))
+    split_index = int(len(X) * (1 - test_ratio))
+    X_train, X_test = X[:split_index], X[split_index:]
+    y_train, y_test = y[:split_index], y[split_index:]
 
-        # ---- 2) Create sequences and train the same kind of model as below ----
-        X, y = create_sequences(scaled_close, window_size)  # reuses your existing function
+    model = Sequential()
+    model.add(LSTM(50, return_sequences=True, input_shape=(window_size, 1)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(50, return_sequences=False))
+    model.add(Dropout(0.2))
+    model.add(Dense(1))
+    model.compile(optimizer="adam", loss="mse")
 
-        split_index = int(len(X) * (1 - test_ratio))
-        X_train, X_test = X[:split_index], X[split_index:]
-        y_train, y_test = y[:split_index], y[split_index:]
+    model.fit(
+        X_train,
+        y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_data=(X_test, y_test),
+        verbose=1,
+    )
+    print("LSTM training finished, computing trading positions now")
+    if make_plots:
+        import os
+        os.makedirs("results", exist_ok=True)
 
-        model = Sequential()
-        model.add(LSTM(50, return_sequences=True, input_shape=(window_size, 1)))
-        model.add(Dropout(0.2))
-        model.add(LSTM(50, return_sequences=False))
-        model.add(Dropout(0.2))
-        model.add(Dense(1))
-        model.compile(optimizer="adam", loss="mse")
+        # test set predictions with 
+        y_pred_scaled = model.predict(X_test)
+        y_test_2d = y_test.reshape(-1, 1)
+        y_pred_2d = y_pred_scaled.reshape(-1, 1)
 
-        model.fit(
-            X_train,
-            y_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_data=(X_test, y_test),
-            verbose=1,
-        )
+        y_test_inv = scaler.inverse_transform(y_test_2d)
+        y_pred_inv = scaler.inverse_transform(y_pred_2d)
 
-        # ---- 3) Use predictions to build positions ----
-        df["position"] = 0  # start flat
+        rmse = np.sqrt(mean_squared_error(y_test_inv, y_pred_inv))
+        mae = mean_absolute_error(y_test_inv, y_pred_inv)
+        print(f"[LSTM {ticker}] Test RMSE: {rmse:.4f}")
+        print(f"[LSTM {ticker}] Test MAE:  {mae:.4f}")
 
-        for i in range(window_size, len(df)):
-            prev_pos = df.at[i - 1, "position"]
+        plt.figure(figsize=(10, 5))
+        plt.plot(y_test_inv, label="True Price")
+        plt.plot(y_pred_inv, label="Predicted Price")
+        plt.title(f"{ticker} - LSTM Test Set Prediction Performance")
+        plt.xlabel("Sample index (chronological)")
+        plt.ylabel("Price")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("results/lstm_test_set_prediction.png", dpi=300)
+        plt.close()
+        print("Saved: results/lstm_test_set_prediction.png")
 
-            window = scaled_close[i - window_size : i]
-            x_input = window.reshape((1, window_size, 1))
+        # Next-day prediction
+        print("Predicting the next 'day' (next step) price...")
 
-            pred_scaled = model.predict(x_input, verbose=0)
+        last_window = scaled_close[-window_size:]
+        last_window = last_window.reshape((1, window_size, 1))
+
+        next_step_scaled = model.predict(last_window)
+        next_step_price = scaler.inverse_transform(next_step_scaled)[0, 0]
+
+        last_real_price = float(df["Price"].iloc[-1])
+        print(f"Last real price: {last_real_price:.2f}")
+        print(f"Predicted next-step price: {next_step_price:.2f}")
+
+        recent_prices = df["Price"].iloc[-window_size:]
+
+        plt.figure(figsize=(10, 4))
+        plt.plot(range(len(recent_prices)), recent_prices, label="Recent True Price")
+        plt.scatter(len(recent_prices), next_step_price, marker="o", label="Predicted Next Price")
+        plt.title(f"{ticker} - Next-Step Prediction")
+        plt.xlabel("Steps back")
+        plt.ylabel("Price")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("results/lstm_next_step_prediction.png", dpi=300)
+        plt.close()
+        print("Saved: results/lstm_next_step_prediction.png")
+
+        # Recursive N-step forecast
+        N_FUTURE_STEPS = 7
+        future_predictions = []
+        current_window = scaled_close[-window_size:].copy()
+
+        for _ in range(N_FUTURE_STEPS):
+            x_input = current_window.reshape((1, window_size, 1))
+            pred_scaled = model.predict(x_input)
             pred_price = scaler.inverse_transform(pred_scaled)[0, 0]
+            future_predictions.append(pred_price)
+            current_window = np.vstack([current_window[1:], pred_scaled])
 
-            current_price = df.at[i, "Price"]
-            if current_price <= 0:
-                df.at[i, "position"] = prev_pos
-                continue
+        print(f"Recursive prediction for next {N_FUTURE_STEPS} steps:")
+        for i, p in enumerate(future_predictions, 1):
+            print(f"  Step {i}: {p:.2f}")
 
-            predicted_return = (pred_price - current_price) / current_price
+        plt.figure(figsize=(8, 4))
+        steps_ahead = range(1, N_FUTURE_STEPS + 1)
+        plt.plot(steps_ahead, future_predictions, marker="o", label="Predicted Price")
+        plt.title(f"{ticker} - Next {N_FUTURE_STEPS} Steps Forecast")
+        plt.xlabel("Steps Ahead")
+        plt.ylabel("Predicted Price")
+        plt.xticks(steps_ahead)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("results/lstm_recursive_forecast.png", dpi=300)
+        plt.close()
+        print("Saved: results/lstm_recursive_forecast.png")
 
-            if predicted_return > up_threshold:
-                new_pos = min(prev_pos + 1, max_pos)
-            elif predicted_return < down_threshold:
-                new_pos = max(prev_pos - 1, 0)
-            else:
-                new_pos = prev_pos
+    n = len(df)
+    num_points = n - window_size
 
-            df.at[i, "position"] = new_pos
+    # build all sliding windows for prediction
+    all_windows = np.zeros((num_points, window_size, 1))
+    for j in range(num_points):
+        all_windows[j, :, 0] = scaled_close[j : j + window_size, 0]
 
-        return df
+    # a big prediction call 
+    all_pred_scaled = model.predict(all_windows, batch_size=1024, verbose=0)
+    all_pred_prices = scaler.inverse_transform(all_pred_scaled)[:, 0]
 
+    # Use predictions to build positions 
+    df["position"] = 0  # start flat
 
+    for idx in range(window_size, n):
+        j = idx - window_size  # index into all_pred_prices
+
+        prev_pos = df.at[idx - 1, "position"]
+        pred_price = float(all_pred_prices[j])
+
+        current_price = df.at[idx, "Price"]
+        if current_price <= 0:
+            df.at[idx, "position"] = prev_pos
+            continue
+
+        predicted_return = (pred_price - current_price) / current_price
+
+        if predicted_return > up_threshold:
+            new_pos = min(prev_pos + 1, max_pos)
+        elif predicted_return < down_threshold:
+            new_pos = max(prev_pos - 1, 0)
+        else:
+            new_pos = prev_pos
+
+        df.at[idx, "position"] = new_pos
+
+    return df
+
+# Main code for AAPL stock prediction and graphics for presentation, code above adapted from this
+if __name__ == "__main__":
+
+    # Code preserved here is necessary for graphics and demonstration
     # ===================== 1. Download Data ===================== #
     df = yf.download(TICKER, start=START_DATE, end=END_DATE)
 
@@ -118,14 +206,6 @@ if __name__ == "main":
     # ===================== 2. Normalization ===================== #
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_close = scaler.fit_transform(df[["Close"]].values)
-
-    # ===================== 3. Create Sliding Window Sequences ===================== #
-    def create_sequences(data, window_size):
-        X, y = [], []
-        for i in range(window_size, len(data)):
-            X.append(data[i-window_size:i, 0])  # Past window_size days
-            y.append(data[i, 0])                # Value on day i
-        return np.array(X), np.array(y)
 
     X, y = create_sequences(scaled_close, WINDOW_SIZE)
     print("X shape (samples, timesteps):", X.shape)
@@ -178,6 +258,9 @@ if __name__ == "main":
     mae = mean_absolute_error(y_test_inv, y_pred_inv)
     print(f"Test RMSE: {rmse:.4f}")
     print(f"Test MAE:  {mae:.4f}")
+
+    import os
+    os.makedirs("results", exist_ok=True)
 
     # ===================== 8. Visualization: True vs Prediction ===================== #
     plt.figure(figsize=(10, 5))

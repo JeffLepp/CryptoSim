@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+from prediction import create_lstm_positions_from_df
 from tax_class import TaxRule, Lot, get_tax_rate, match_lots, fifo_strategy, lifo_strategy, hifo_strategy, output_tax_report
 from test import run_test
 
@@ -11,6 +12,7 @@ from test import run_test
 
 FILE_NAME = "btcusd_1-min_data.csv" # 7291838 available rows, each representing a minute of BTC price data
 SCALEDOWN_FACTOR = 30 # Large dataset, if set to 30 we will consider BTC price once every 30 mins
+USE_LSTM_SIGNALS = True  
 
 # Loading the BTC price data from CSV file
 def load_price_data(file_name = FILE_NAME):
@@ -130,7 +132,6 @@ def create_transactions_from_signals(df, trade_size = .1, fee_rate = .001):
     return trades_df
 
 def main():
-
     df = load_price_data(FILE_NAME)
     df = preprocess_data(df)
 
@@ -141,8 +142,20 @@ def main():
     sell_threshold = -0.05
     max_pos = 10
 
-    df = create_portfolio_signals(df, max_pos, buy_threshold, sell_threshold)
-    trades_df = create_transactions_from_signals(df, trade_size, fee_rate)
+    if USE_LSTM_SIGNALS:
+        df_signals = create_lstm_positions_from_df(
+            df,
+            max_pos=max_pos,
+            epochs=5,        
+            up_threshold=0.01,
+            down_threshold=-0.01,
+        )
+    else:
+        # Original SMA/momentum toy trader
+        df_signals = create_portfolio_signals(df, max_pos, buy_threshold, sell_threshold)
+
+    trades_df = create_transactions_from_signals(df_signals, trade_size, fee_rate)
+
 
     print("number of trades:", len(trades_df))
 
